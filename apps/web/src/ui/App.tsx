@@ -45,6 +45,15 @@ export default function App(){
   const [patternScale, setPatternScale] = useState<number>(1);
   const [patternAngle, setPatternAngle] = useState<number>(0);
   const [grade, setGrade] = useState({ exposure: 1, contrast: 1, gamma: 1, saturation: 1 });
+  // View transform
+  const [viewScale, setViewScale] = useState<number>(1);
+  const [viewOffset, setViewOffset] = useState<{x:number;y:number}>({ x: 0, y: 0 });
+  // Crop selection (stored in CSS pixels relative to CANVAS element, not container)
+  const [cropRect, setCropRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  const [cropMode, setCropMode] = useState(false);
+  const [cropAspect, setCropAspect] = useState<number | null>(null); // e.g., 1 (1:1), 4/3, 3/2, 16/9; null = free
+  // Canvas box within the container (CSS pixels)
+  const [canvasBox, setCanvasBox] = useState<{ x: number; y: number; w: number; h: number }>({ x: 0, y: 0, w: 0, h: 0 });
   // A/B compare
   const [abCompare, setAbCompare] = useState(false);
   const [abSplit, setAbSplit] = useState(0.5);
@@ -67,6 +76,79 @@ export default function App(){
   const [showPresets, setShowPresets] = useState(false);
   // const [showBatchVideo, setShowBatchVideo] = useState(false);
   const importPresetInputRef = useRef<HTMLInputElement | null>(null);
+  const [undoStack, setUndoStack] = useState<ImageBitmap[]>([]);
+  const MAX_UNDO = 10;
+
+  async function applyCropToImage(){
+    if(!imageBitmap){ push('Load an image first', 'error'); return; }
+    const ic = currentImageCrop();
+    if(!ic || ic.w < 1 || ic.h < 1){ push('Draw a crop selection first', 'error'); return; }
+    try {
+      // Stage: draw cropped region into an offscreen canvas, then make a new ImageBitmap
+      const off = document.createElement('canvas');
+      off.width = ic.w; off.height = ic.h;
+      const ctx = off.getContext('2d', { willReadFrequently: true })!;
+      ctx.drawImage(imageBitmap, ic.x, ic.y, ic.w, ic.h, 0, 0, ic.w, ic.h);
+      const cropped = await createImageBitmap(off);
+      // Push current image to undo stack
+      setUndoStack((s)=>{
+        const next = [...s, imageBitmap];
+        if(next.length > MAX_UNDO){ const drop = next.shift(); try { (drop as any)?.close?.(); } catch {} }
+        return next;
+      });
+      setImageBitmap(cropped);
+      setCropRect(null);
+      // Reset view
+      setViewScale(1); setViewOffset({ x: 0, y: 0 });
+      glRef.current?.setParams({ viewScale: 1, viewOffset: { x: 0, y: 0 } });
+      push('Applied crop', 'success');
+    } catch (err){ console.error(err); push('Failed to apply crop', 'error'); }
+  }
+
+  function undo(){
+    if(!undoStack.length){ push('Nothing to undo', 'info'); return; }
+    const prev = undoStack[undoStack.length - 1];
+    setUndoStack((s)=> s.slice(0, -1));
+    const cur = imageBitmap;
+    setImageBitmap(prev);
+    try { (cur as any)?.close?.(); } catch {}
+    setCropRect(null);
+    setViewScale(1); setViewOffset({ x: 0, y: 0 });
+    glRef.current?.setParams({ viewScale: 1, viewOffset: { x: 0, y: 0 } });
+    push('Undone', 'success');
+  }
+
+  // Map current canvas cropRect (CSS px) into image pixel rect, accounting for viewScale/viewOffset
+  function currentImageCrop(): { x: number; y: number; w: number; h: number } | null {
+    if(!canvasRef.current || !imageBitmap || !cropRect) return null;
+    const c = canvasRef.current;
+    const css = c.getBoundingClientRect();
+    const cw = css.width || 1, ch = css.height || 1;
+    // Convert crop (top-left) to canvas-relative normalized [0,1]
+    const x0_tl = cropRect.x / cw; const y0_tl = cropRect.y / ch;
+    const x1_tl = (cropRect.x + cropRect.w) / cw; const y1_tl = (cropRect.y + cropRect.h) / ch;
+    // Convert TL to BL to apply view
+    const uv0_bl = { x: x0_tl, y: 1 - y0_tl };
+    const uv1_bl = { x: x1_tl, y: 1 - y1_tl };
+    const s = Math.max(0.001, viewScale); const off = viewOffset;
+    const applyView = (u:{x:number;y:number})=> ({ x: (u.x - 0.5)/s + 0.5 + off.x, y: (u.y - 0.5)/s + 0.5 + off.y });
+    const img0_bl = applyView(uv0_bl); const img1_bl = applyView(uv1_bl);
+    // Back to TL
+    const img0 = { x: img0_bl.x, y: 1 - img0_bl.y };
+    const img1 = { x: img1_bl.x, y: 1 - img1_bl.y };
+    const clamp01 = (v:number)=> Math.max(0, Math.min(1, v));
+    const ix0 = clamp01(Math.min(img0.x, img1.x));
+    const iy0 = clamp01(Math.min(img0.y, img1.y));
+    const ix1 = clamp01(Math.max(img0.x, img1.x));
+    const iy1 = clamp01(Math.max(img0.y, img1.y));
+    const sx = Math.floor(ix0 * imageBitmap.width);
+    const sy = Math.floor(iy0 * imageBitmap.height);
+    const ex = Math.ceil(ix1 * imageBitmap.width);
+    const ey = Math.ceil(iy1 * imageBitmap.height);
+    const w = Math.max(1, ex - sx);
+    const h = Math.max(1, ey - sy);
+    return { x: sx, y: sy, w, h };
+  }
 
   function download(filename: string, data: Blob){ const url=URL.createObjectURL(data); const a=document.createElement('a'); a.href=url; a.download=filename; a.click(); setTimeout(()=>URL.revokeObjectURL(url), 1000); }
   const AUTOSAVE_KEY = 'dp2_autosave_v1';
@@ -168,13 +250,21 @@ export default function App(){
     const resize = () => {
       const dpr = window.devicePixelRatio || 1; const cw = container.clientWidth||1; const ch = container.clientHeight||1;
       let dispW = cw, dispH = ch;
-      const bmp = imageBitmap; if(bmp && bmp.width>0 && bmp.height>0){
-        const ratio = bmp.width / bmp.height; const contRatio = cw / ch;
+      // Prefer crop aspect if active, else source image aspect
+      let ratio: number | null = null;
+      const crop = currentImageCrop();
+      if(crop){ ratio = crop.w / Math.max(1, crop.h); }
+      const bmp = imageBitmap; if(!ratio && bmp && bmp.width>0 && bmp.height>0){ ratio = bmp.width / bmp.height; }
+      if(ratio){
+        const contRatio = cw / ch;
         if(contRatio > ratio){ dispH = ch; dispW = Math.round(ch * ratio); } else { dispW = cw; dispH = Math.round(cw / ratio); }
       }
       canvas.style.width = dispW+'px'; canvas.style.height = dispH+'px';
       const pw = Math.max(1, Math.round(dispW*dpr)); const ph = Math.max(1, Math.round(dispH*dpr));
       if(canvas.width!==pw||canvas.height!==ph){ canvas.width=pw; canvas.height=ph; glRef.current?.requestFrame(); }
+      // Track canvas box within container for crop mapping/display
+      const crect = container.getBoundingClientRect(); const canRect = canvas.getBoundingClientRect();
+      setCanvasBox({ x: Math.round(canRect.left - crect.left), y: Math.round(canRect.top - crect.top), w: Math.round(canRect.width), h: Math.round(canRect.height) });
       // CPU canvas mirrors GL sizing
       const cc = cpuCanvasRef.current;
       if(cc){
@@ -203,9 +293,9 @@ export default function App(){
       const p = findPattern(patternId) || patternPresets[0];
       if(p) glr.setPattern(p.size, p.data);
     }
-    glr.setParams({ pixelate, thresholdBias, algorithm, patternScale, patternAngle, mode, applyGrade: true, passthrough: false, abCompare, abSplit, abVertical });
+    glr.setParams({ pixelate, thresholdBias, algorithm, patternScale, patternAngle, mode, applyGrade: true, passthrough: false, abCompare, abSplit, abVertical, viewScale, viewOffset });
     glr.setGrade(grade);
-  }, [previewMode, mode, imageBitmap, palette, pixelate, thresholdBias, algorithm, patternId, patternScale, patternAngle, grade, abCompare, abSplit, abVertical]);
+  }, [previewMode, mode, imageBitmap, palette, pixelate, thresholdBias, algorithm, patternId, patternScale, patternAngle, grade, abCompare, abSplit, abVertical, viewScale, viewOffset]);
 
   // Pattern thumbnails (for Select items)
   const thumbCache = useRef<Map<string, string>>(new Map());
@@ -251,6 +341,7 @@ export default function App(){
       pixelate,
       kernel,
       grade,
+      crop: currentImageCrop() ? ['c'] : null,
     });
   }
 
@@ -273,8 +364,10 @@ export default function App(){
       try{
         const w=imageBitmap.width, h=imageBitmap.height;
         const tmp=document.createElement('canvas'); tmp.width=w; tmp.height=h; const tctx=tmp.getContext('2d',{willReadFrequently:true})!; tctx.drawImage(imageBitmap,0,0);
-        const src=tctx.getImageData(0,0,w,h);
-        const out = await client.runED({ width:w, height:h, data: src.data, palette, serpentine, diffusionStrength, thresholdBias, pixelate, kernelName: kernel, grade });
+        const ic = currentImageCrop();
+        const sx = ic ? ic.x : 0, sy = ic ? ic.y : 0, sw = ic ? ic.w : w, sh = ic ? ic.h : h;
+        const src=tctx.getImageData(sx,sy,sw,sh);
+        const out = await client.runED({ width:src.width, height:src.height, data: src.data, palette, serpentine, diffusionStrength, thresholdBias, pixelate, kernelName: kernel, grade });
         if(cancelled) return;
         // Draw to CPU canvas (dedicated) without GL passthrough
         cpuImageRef.current = out;
@@ -307,6 +400,9 @@ export default function App(){
       const tag = (e.target as HTMLElement | null)?.tagName;
       if(tag && /INPUT|TEXTAREA|SELECT/.test(tag)) return;
       const delta = e.shiftKey ? 0.01 : 0.05;
+      if((e.metaKey || e.ctrlKey) && e.key.toLowerCase()==='z'){
+        e.preventDefault(); undo(); return;
+      }
       if(e.key === 'e'){ setShowExport(true); e.preventDefault(); return; }
       if(e.key === 'b'){ setShowBatchExport(true); e.preventDefault(); return; }
       if(e.key === 'p'){ setShowPresets(true); e.preventDefault(); return; }
@@ -411,6 +507,8 @@ export default function App(){
           palette={palette}
           grade={grade}
           cpuOpts={{ serpentine, diffusionStrength, thresholdBias, pixelate, kernelName: kernel }}
+          cropRect={cropRect}
+          view={{ scale: viewScale, offset: viewOffset }}
         />
       )}
       {showBatchExport && (
@@ -609,6 +707,29 @@ export default function App(){
                 </Slider.Root>
               </div>
               <div>
+                <Subheading>Zoom</Subheading>
+                <div className="flex items-center gap-2">
+                  <Slider.Root className="relative flex items-center select-none touch-none w-full h-5" value={[viewScale]} max={16} min={0.125} step={0.005} onValueChange={(v)=>{ const val=v[0]??1; setViewScale(val); glRef.current?.setParams({ viewScale: val }); }}>
+                    <Slider.Track className="bg-zinc-800 relative grow rounded h-1"><Slider.Range className="absolute bg-zinc-400 rounded h-full" /></Slider.Track>
+                    <Slider.Thumb className="block w-4 h-4 bg-white rounded shadow" aria-label="Zoom" />
+                  </Slider.Root>
+                  <div className="w-14 text-right text-sm text-zinc-400">{Math.round(viewScale*100)}%</div>
+                </div>
+                <div className="mt-2 flex gap-2 flex-wrap items-center">
+                  <button className="px-2 py-1 rounded bg-zinc-800 border border-zinc-700" onClick={()=>{ setViewScale(1); setViewOffset({ x: 0, y: 0 }); glRef.current?.setParams({ viewScale: 1, viewOffset: { x: 0, y: 0 } }); }}>Reset</button>
+                  <button className="px-2 py-1 rounded bg-zinc-800 border border-zinc-700" onClick={()=>{ setViewScale(s=>Math.max(0.125, s*0.9)); }}>-</button>
+                  <button className="px-2 py-1 rounded bg-zinc-800 border border-zinc-700" onClick={()=>{ setViewScale(s=>Math.min(16, s*1.1)); }}>+</button>
+                  <button className="px-2 py-1 rounded bg-zinc-800 border border-zinc-700" onClick={()=>{ setCropMode(true); }}>Start Crop</button>
+                  {!!cropRect && <button className="px-2 py-1 rounded bg-zinc-800 border border-zinc-700" onClick={()=> setCropRect(null)}>Clear Crop</button>}
+                  {!!cropRect && <button className="px-2 py-1 rounded bg-amber-500/20 border border-amber-400 text-amber-300" onClick={applyCropToImage}>Apply Crop</button>}
+                  <button className="px-2 py-1 rounded bg-zinc-800 border border-zinc-700 disabled:opacity-50" onClick={undo} disabled={undoStack.length===0}>Undo</button>
+                  <span className="text-sm text-zinc-400 ml-2">Aspect</span>
+                  {[[null,'Free'],[1,'1:1'],[4/3,'4:3'],[3/2,'3:2'],[16/9,'16:9']].map(([val,label])=> (
+                    <button key={String(label)} className={`px-2 py-1 rounded border ${cropAspect===val? 'bg-sky-500 border-sky-400 text-black' : 'bg-zinc-800 border-zinc-700'}`} onClick={()=> setCropAspect(val as any)}>{label}</button>
+                  ))}
+                </div>
+              </div>
+              <div>
                 <div className="text-sm text-zinc-400 mb-1">CPU Kernel (export/CPU preview)</div>
                 <select className="bg-zinc-900 border border-zinc-800 rounded px-2 py-1 w-full" value={kernel} onChange={(e)=>{ setKernel(e.target.value); }}>
                   {['floyd-steinberg','jjn','stucki','atkinson','burkes','sierra-lite','sierra-2-4a','sierra-3','stevenson-arce'].map(k=> <option key={k} value={k}>{k}</option>)}
@@ -675,9 +796,115 @@ export default function App(){
             const f = e.dataTransfer.files?.[0]; if(!f) return;
             if(!f.type.startsWith('image/')){ alert('Please drop an image file'); return; }
             const bmp = await createImageBitmap(f); setImageBitmap(bmp); push('Image loaded','success');
-          }}>
+          }}
+          onWheel={(e)=>{
+            if(previewMode!=='gpu') return;
+            e.preventDefault();
+            const c = canvasRef.current; if(!c) return;
+            const rect = c.getBoundingClientRect();
+            const sx = (e.clientX - rect.left)/rect.width;
+            const sy = (e.clientY - rect.top)/rect.height;
+            const s1 = viewScale;
+            const s2 = Math.max(0.125, Math.min(16, s1 * (e.deltaY > 0 ? 0.9 : 1.1)));
+            const dx = (sx - 0.5) * (1/s1 - 1/s2);
+            const dy = (sy - 0.5) * (1/s1 - 1/s2);
+            setViewScale(s2);
+            setViewOffset((vo)=> ({ x: vo.x + dx, y: vo.y + dy }));
+            glRef.current?.setParams({ viewScale: s2, viewOffset: { x: (viewOffset.x + dx), y: (viewOffset.y + dy) } });
+          }}
+        >
           {/* GPU canvas (hidden in CPU mode) */}
-          <canvas ref={canvasRef} className={`${previewMode==='gpu' ? 'block' : 'hidden'} w-full h-full`} />
+          <canvas
+            ref={canvasRef}
+            className={`${previewMode==='gpu' ? 'block' : 'hidden'} w-full h-full`}
+            onPointerDown={(e)=>{
+              if(previewMode!=='gpu') return;
+              const canvas = e.currentTarget; canvas.setPointerCapture(e.pointerId);
+              let lastX = e.clientX, lastY = e.clientY;
+              const move = (ev: PointerEvent)=>{
+                const dx = (ev.clientX - lastX) / canvas.width;
+                const dy = (ev.clientY - lastY) / canvas.height;
+                lastX = ev.clientX; lastY = ev.clientY;
+                const s = viewScale;
+                setViewOffset((vo)=>{ const no = { x: vo.x - dx/s, y: vo.y - dy/s }; glRef.current?.setParams({ viewOffset: no }); return no; });
+              };
+              const up = ()=>{
+                canvas.releasePointerCapture(e.pointerId);
+                window.removeEventListener('pointermove', move);
+                window.removeEventListener('pointerup', up);
+              };
+              window.addEventListener('pointermove', move);
+              window.addEventListener('pointerup', up);
+            }}
+          />
+          {/* Crop capture layer */}
+          {cropMode && (
+            <div
+              className="absolute inset-0 cursor-crosshair"
+              onMouseDown={(e)=>{
+                e.preventDefault();
+                const cont = containerRef.current; const canv = canvasRef.current; if(!cont||!canv) return;
+                const crect = cont.getBoundingClientRect(); const canRect = canv.getBoundingClientRect();
+                const offsetX = canRect.left - crect.left; const offsetY = canRect.top - crect.top;
+                // Start point relative to canvas box
+                let sx = (e.clientX - crect.left) - offsetX;
+                let sy = (e.clientY - crect.top) - offsetY;
+                // Clamp to canvas area
+                sx = Math.max(0, Math.min(canvasBox.w, sx));
+                sy = Math.max(0, Math.min(canvasBox.h, sy));
+                setCropRect({ x: sx, y: sy, w: 0, h: 0 });
+                const move = (ev: MouseEvent)=>{
+                  let cx = (ev.clientX - crect.left) - offsetX;
+                  let cy = (ev.clientY - crect.top) - offsetY;
+                  // Clamp to canvas area
+                  cx = Math.max(0, Math.min(canvasBox.w, cx));
+                  cy = Math.max(0, Math.min(canvasBox.h, cy));
+                  const dx = cx - sx, dy = cy - sy;
+                  let w = Math.abs(dx); let h = Math.abs(dy);
+                  let x0 = dx >= 0 ? sx : (sx - w);
+                  let y0 = dy >= 0 ? sy : (sy - h);
+                  if(cropAspect && cropAspect > 0){
+                    const a = cropAspect;
+                    if(w / Math.max(h, 1e-6) > a){ w = h * a; x0 = dx>=0 ? sx : (sx - w); }
+                    else { h = w / a; y0 = dy>=0 ? sy : (sy - h); }
+                  }
+                  // Clamp to canvas bounds while preserving aspect
+                  if(x0 < 0){ const over = -x0; x0 = 0; if(cropAspect){ w = Math.max(0, w - over); if(cropAspect){ h = w / cropAspect; if(dy<0) y0 = sy - h; } } }
+                  if(y0 < 0){ const over = -y0; y0 = 0; if(cropAspect){ h = Math.max(0, h - over); if(cropAspect){ w = h * cropAspect; if(dx<0) x0 = sx - w; } } }
+                  if(x0 + w > canvasBox.w){ const over = x0 + w - canvasBox.w; if(dx>=0) w -= over; else { x0 -= over; if(x0<0){ w += x0; x0=0; } } if(cropAspect){ h = w / cropAspect; if(dy<0) y0 = sy - h; } }
+                  if(y0 + h > canvasBox.h){ const over = y0 + h - canvasBox.h; if(dy>=0) h -= over; else { y0 -= over; if(y0<0){ h += y0; y0=0; } } if(cropAspect){ w = h * cropAspect; if(dx<0) x0 = sx - w; } }
+                  setCropRect({ x: Math.round(x0), y: Math.round(y0), w: Math.round(Math.max(0, w)), h: Math.round(Math.max(0, h)) });
+                };
+                const up = ()=>{
+                  window.removeEventListener('mousemove', move);
+                  window.removeEventListener('mouseup', up);
+                  setCropMode(false);
+                  // Auto-apply crop to view: adjust viewScale and viewOffset so crop fills the viewport
+                  const c = currentImageCrop(); if(c && imageBitmap){
+                    const u0 = c.x / imageBitmap.width;
+                    const v0 = c.y / imageBitmap.height; // top-left
+                    const u1 = (c.x + c.w) / imageBitmap.width;
+                    const v1 = (c.y + c.h) / imageBitmap.height;
+                    const cx = (u0 + u1) * 0.5; const cy = (v0 + v1) * 0.5;
+                    const sX = 1 / Math.max(1e-6, (u1 - u0));
+                    const sY = 1 / Math.max(1e-6, (v1 - v0));
+                    // Because canvas will letterbox to crop aspect, sX ~= sY; use average for stability
+                    const s = (sX + sY) * 0.5;
+                    setViewScale(s);
+                    const off = { x: cx - 0.5, y: cy - 0.5 };
+                    setViewOffset(off);
+                    glRef.current?.setParams({ viewScale: s, viewOffset: off });
+                  }
+                };
+                window.addEventListener('mousemove', move);
+                window.addEventListener('mouseup', up);
+              }}
+            />
+          )}
+          {/* Crop overlay */}
+          {cropRect && (
+            <div className="absolute pointer-events-none border-2 border-amber-400" style={{ left: canvasBox.x + cropRect.x, top: canvasBox.y + cropRect.y, width: cropRect.w, height: cropRect.h }} />
+          )}
           {/* A/B draggable divider (GPU mode only) */}
           {previewMode==='gpu' && abCompare && (
             <div

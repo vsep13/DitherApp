@@ -19,6 +19,9 @@ uniform float u_thresholdBias; // -1..1
 uniform float u_patternScale; // >=1
 uniform float u_patternAngle; // radians
 uniform sampler2D u_patternTex; uniform vec2 u_patternSize;
+// View transform
+uniform float u_viewScale; // zoom (>0)
+uniform vec2 u_viewOffset; // pan in UV space
 // Grade
 uniform float u_exposure; uniform float u_contrast; uniform float u_gamma; uniform float u_saturation;
 // Flags
@@ -32,6 +35,11 @@ uniform int u_abVertical; // 1=vertical split (use x), 0=horizontal (use y)
 vec3 fetchSrc(vec2 uv){ return texture(u_src, vec2(uv.x, 1.0-uv.y)).rgb; }
 vec3 toGray(vec3 c){ float y=dot(c, vec3(0.2126,0.7152,0.0722)); return vec3(y); }
 vec3 nearestPalette(vec3 c){ float best=1e9; vec3 bestc=c; for(int i=0;i<256;i++){ if(i>=u_paletteSize) break; float u=float(i)+0.5; vec3 p=texture(u_paletteTex, vec2(u/256.0, 0.5)).rgb; float d=dot(c-p,c-p); if(d<best){ best=d; bestc=p; } } return bestc; }
+
+vec2 applyView(vec2 uv){
+  // Map canvas UV through zoom/pan in image UV space
+  return (uv - 0.5) / max(u_viewScale, 1e-6) + 0.5 + u_viewOffset;
+}
 
 vec3 applyGrade(vec3 c){
   c *= u_exposure;
@@ -58,7 +66,7 @@ float bayer8(vec2 p){ int x=int(mod(p.x,8.0)); int y=int(mod(p.y,8.0)); int m[64
 float patternThreshold(vec2 uv){ vec2 dims = vec2(textureSize(u_src,0)); vec2 p = uv*dims/max(u_patternScale,1.0); float ca=cos(u_patternAngle), sa=sin(u_patternAngle); mat2 R=mat2(ca,-sa,sa,ca); vec2 q=R*p; vec2 tile=mod(q, u_patternSize); vec2 tuv=(tile+vec2(0.5))/u_patternSize; return texture(u_patternTex, tuv).r; }
 
 void main(){
-  vec2 uv=v_uv; vec2 dims=vec2(textureSize(u_src,0));
+  vec2 uv=applyView(v_uv); vec2 dims=vec2(textureSize(u_src,0));
   if(u_pixelate>1){ vec2 p=uv*dims; p=floor(p/float(u_pixelate))*float(u_pixelate)+vec2(0.5); uv=p/dims; }
   vec3 s = fetchSrc(uv);
   vec3 c = (u_applyGrade==1) ? applyGrade(s) : s;
@@ -96,9 +104,10 @@ export class GLRenderer {
   private paletteSize = 2;
   private patternTex: WebGLTexture | null = null;
   private patternSz: [number, number] = [8,8];
-  private params: { mode: Mode; algorithm: Algorithm; pixelate: number; thresholdBias: number; patternScale: number; patternAngle: number; applyGrade: boolean; passthrough: boolean; abCompare: boolean; abSplit: number; abVertical: boolean } = {
+  private params: { mode: Mode; algorithm: Algorithm; pixelate: number; thresholdBias: number; patternScale: number; patternAngle: number; applyGrade: boolean; passthrough: boolean; abCompare: boolean; abSplit: number; abVertical: boolean; viewScale: number; viewOffset: { x: number; y: number } } = {
     mode: 'indexed', algorithm: 'bayer8', pixelate: 1, thresholdBias: 0, patternScale: 1, patternAngle: 0, applyGrade: true, passthrough: false,
-    abCompare: false, abSplit: 0.5, abVertical: true
+    abCompare: false, abSplit: 0.5, abVertical: true,
+    viewScale: 1, viewOffset: { x: 0, y: 0 }
   };
   private grade = { exposure: 1, contrast: 1, gamma: 1, saturation: 1 };
 
@@ -161,6 +170,9 @@ export class GLRenderer {
     gl.uniform1f(gl.getUniformLocation(this.prog,'u_thresholdBias'), this.params.thresholdBias);
     gl.uniform1f(gl.getUniformLocation(this.prog,'u_patternScale'), Math.max(1, this.params.patternScale));
     gl.uniform1f(gl.getUniformLocation(this.prog,'u_patternAngle'), this.params.patternAngle);
+    // View uniforms
+    gl.uniform1f(gl.getUniformLocation(this.prog,'u_viewScale'), Math.max(0.01, this.params.viewScale||1));
+    gl.uniform2f(gl.getUniformLocation(this.prog,'u_viewOffset'), this.params.viewOffset?.x||0, this.params.viewOffset?.y||0);
     // Grade uniforms
     gl.uniform1f(gl.getUniformLocation(this.prog,'u_exposure'), this.grade.exposure);
     gl.uniform1f(gl.getUniformLocation(this.prog,'u_contrast'), this.grade.contrast);

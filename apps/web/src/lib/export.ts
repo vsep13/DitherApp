@@ -6,17 +6,29 @@ function downloadBlob(blob: Blob, filename: string){
   const url = URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download=filename; a.click(); setTimeout(()=>URL.revokeObjectURL(url), 1000);
 }
 
-export async function exportPNGFromGL(canvas: HTMLCanvasElement, filename='dither.png', opts?: { scale?: number; background?: string }){
+export async function exportPNGFromGL(canvas: HTMLCanvasElement, filename='dither.png', opts?: { scale?: number; background?: string; crop?: { x: number; y: number; w: number; h: number } }){
   const gl = canvas.getContext('webgl2'); if(!gl) return;
-  const w = canvas.width, h = canvas.height; const pixels = new Uint8Array(w*h*4);
-  gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+  const css = canvas.getBoundingClientRect();
+  const sx = css.width > 0 ? (canvas.width / css.width) : 1;
+  const sy = css.height > 0 ? (canvas.height / css.height) : 1;
+  let rx = 0, ry = 0, rw = canvas.width, rh = canvas.height;
+  if(opts?.crop){
+    rx = Math.max(0, Math.min(canvas.width, Math.round(opts.crop.x * sx)));
+    ry = Math.max(0, Math.min(canvas.height, Math.round(opts.crop.y * sy)));
+    rw = Math.max(1, Math.min(canvas.width - rx, Math.round(opts.crop.w * sx)));
+    rh = Math.max(1, Math.min(canvas.height - ry, Math.round(opts.crop.h * sy)));
+  }
+  const pixels = new Uint8Array(rw*rh*4);
+  // WebGL origin is bottom-left; convert Y from top-left CSS to bottom-left GL
+  const yGL = canvas.height - (ry + rh);
+  gl.readPixels(rx, Math.max(0, yGL), rw, rh, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
   // Flip vertically
-  const row = w*4; for(let y=0;y<h/2;y++){ const a=y*row, b=(h-1-y)*row; for(let i=0;i<row;i++){ const t = pixels[a+i]; pixels[a+i]=pixels[b+i]; pixels[b+i]=t; } }
-  const imgData = new ImageData(new Uint8ClampedArray(pixels.buffer), w, h);
+  const row = rw*4; for(let y=0;y<Math.floor(rh/2);y++){ const a=y*row, b=(rh-1-y)*row; for(let i=0;i<row;i++){ const t = pixels[a+i]; pixels[a+i]=pixels[b+i]; pixels[b+i]=t; } }
+  const imgData = new ImageData(new Uint8ClampedArray(pixels.buffer), rw, rh);
   // Draw into staging canvas, then composite + scale into final
-  const stage = document.createElement('canvas'); stage.width=w; stage.height=h; const sctx=stage.getContext('2d')!; sctx.putImageData(imgData, 0, 0);
+  const stage = document.createElement('canvas'); stage.width=rw; stage.height=rh; const sctx=stage.getContext('2d')!; sctx.putImageData(imgData, 0, 0);
   const scale = Math.max(1, Math.floor(opts?.scale || 1));
-  const outW = w*scale, outH = h*scale;
+  const outW = rw*scale, outH = rh*scale;
   const out = document.createElement('canvas'); out.width=outW; out.height=outH; const octx = out.getContext('2d')!;
   octx.imageSmoothingEnabled = false;
   if(opts?.background){ octx.fillStyle = opts.background; octx.fillRect(0,0,outW,outH); }
@@ -51,13 +63,17 @@ export async function exportIndexedPNGViaCPU(
   palette: string[],
   grade: { exposure: number; contrast: number; gamma: number; saturation: number },
   opts: { serpentine: boolean; diffusionStrength: number; thresholdBias: number; pixelate: number; kernelName: string; scale?: number; transparentIndex?: number },
-  filename='dither-indexed.png'){
+  filename='dither-indexed.png',
+  imageCrop?: { x: number; y: number; w: number; h: number }
+){
   if(!palette || palette.length===0) { alert('Please provide a palette first'); return; }
   const client = new EDClient();
   try {
     const w=bmp.width, h=bmp.height;
     const tmp=document.createElement('canvas'); tmp.width=w; tmp.height=h; const tctx=tmp.getContext('2d', { willReadFrequently:true })!; tctx.drawImage(bmp,0,0);
-    const src=tctx.getImageData(0,0,w,h);
+    let sx=0, sy=0, sw=w, sh=h;
+    if(imageCrop){ sx = Math.max(0, Math.min(w-1, imageCrop.x|0)); sy = Math.max(0, Math.min(h-1, imageCrop.y|0)); sw = Math.max(1, Math.min(w - sx, imageCrop.w|0)); sh = Math.max(1, Math.min(h - sy, imageCrop.h|0)); }
+    const src=tctx.getImageData(sx,sy,sw,sh);
     const out = await client.runED({ width:w, height:h, data: src.data, palette, serpentine: opts.serpentine, diffusionStrength: opts.diffusionStrength, thresholdBias: opts.thresholdBias, pixelate: opts.pixelate, kernelName: opts.kernelName, grade });
     // Optional scale
     const scale = Math.max(1, Math.floor(opts.scale || 1));
@@ -90,14 +106,17 @@ export async function exportSwatchMasksZip(
   bmp: ImageBitmap,
   palette: string[],
   grade: { exposure: number; contrast: number; gamma: number; saturation: number },
-  opts: { serpentine: boolean; diffusionStrength: number; thresholdBias: number; pixelate: number; kernelName: string }
+  opts: { serpentine: boolean; diffusionStrength: number; thresholdBias: number; pixelate: number; kernelName: string },
+  imageCrop?: { x: number; y: number; w: number; h: number }
 ){
   const client = new EDClient();
   try {
     const w = bmp.width, h = bmp.height;
     const tmp=document.createElement('canvas'); tmp.width=w; tmp.height=h; const tctx=tmp.getContext('2d', { willReadFrequently: true })!; tctx.drawImage(bmp, 0, 0);
-    const src=tctx.getImageData(0,0,w,h);
-    const out = await client.runED({ width:w, height:h, data: src.data, palette, serpentine: opts.serpentine, diffusionStrength: opts.diffusionStrength, thresholdBias: opts.thresholdBias, pixelate: opts.pixelate, kernelName: opts.kernelName, grade });
+    let sx=0, sy=0, sw=w, sh=h;
+    if(imageCrop){ sx = Math.max(0, Math.min(w-1, imageCrop.x|0)); sy = Math.max(0, Math.min(h-1, imageCrop.y|0)); sw = Math.max(1, Math.min(w - sx, imageCrop.w|0)); sh = Math.max(1, Math.min(h - sy, imageCrop.h|0)); }
+    const src=tctx.getImageData(sx,sy,sw,sh);
+    const out = await client.runED({ width:src.width, height:src.height, data: src.data, palette, serpentine: opts.serpentine, diffusionStrength: opts.diffusionStrength, thresholdBias: opts.thresholdBias, pixelate: opts.pixelate, kernelName: opts.kernelName, grade });
     const idx = indicesFromImage(out, palette);
     const entries: ZipEntry[] = [];
     for(let i=0;i<palette.length && i<64;i++){
@@ -126,14 +145,18 @@ export async function exportIndexedTIFFViaCPU(
   palette: string[],
   grade: { exposure: number; contrast: number; gamma: number; saturation: number },
   opts: { serpentine: boolean; diffusionStrength: number; thresholdBias: number; pixelate: number; kernelName: string; scale?: number },
-  filename='dither-indexed.tiff'){
+  filename='dither-indexed.tiff',
+  imageCrop?: { x: number; y: number; w: number; h: number }
+){
   if(!palette || palette.length===0) { alert('Please provide a palette first'); return; }
   const client = new EDClient();
   try {
     const w=bmp.width, h=bmp.height;
     const tmp=document.createElement('canvas'); tmp.width=w; tmp.height=h; const tctx=tmp.getContext('2d', { willReadFrequently:true })!; tctx.drawImage(bmp,0,0);
-    const src=tctx.getImageData(0,0,w,h);
-    const out = await client.runED({ width:w, height:h, data: src.data, palette, serpentine: opts.serpentine, diffusionStrength: opts.diffusionStrength, thresholdBias: opts.thresholdBias, pixelate: opts.pixelate, kernelName: opts.kernelName, grade });
+    let sx=0, sy=0, sw=w, sh=h;
+    if(imageCrop){ sx = Math.max(0, Math.min(w-1, imageCrop.x|0)); sy = Math.max(0, Math.min(h-1, imageCrop.y|0)); sw = Math.max(1, Math.min(w - sx, imageCrop.w|0)); sh = Math.max(1, Math.min(h - sy, imageCrop.h|0)); }
+    const src=tctx.getImageData(sx,sy,sw,sh);
+    const out = await client.runED({ width:src.width, height:src.height, data: src.data, palette, serpentine: opts.serpentine, diffusionStrength: opts.diffusionStrength, thresholdBias: opts.thresholdBias, pixelate: opts.pixelate, kernelName: opts.kernelName, grade });
     // Optional scale
     const scale = Math.max(1, Math.floor(opts.scale || 1));
     let img = out;
