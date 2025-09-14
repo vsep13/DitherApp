@@ -1,0 +1,29 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "Bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "strict": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/components/*": ["src/components/*"],
+      "@/gpu/*": ["src/gpu/*"],
+      "@/state/*": ["src/state/*"],
+      "@/utils/*": ["src/utils/*"],
+      "@/patterns/*": ["src/patterns/*"],
+      "@/palettes/*": ["src/palettes/*"],
+      "@core/*": ["packages/core/src/*"],
+      "@cpu/*": ["packages/cpu/src/*"],
+      "@gpu/*": ["packages/gpu/src/*"],
+      "@worker/*": ["packages/worker/src/*"]
+    }
+  },
+  "include": ["src", "packages", "apps/web/src"]
+}

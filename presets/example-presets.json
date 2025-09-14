@@ -1,0 +1,27 @@
+[
+  {
+    "name": "Game Boy 4c (Bayer)",
+    "palette": ["#0f380f","#306230","#8bac0f","#9bbc0f"],
+    "pixelate": 2,
+    "mode": "indexed",
+    "algorithm": "bayer8",
+    "serpentine": true,
+    "diffusionStrength": 0.8,
+    "thresholdBias": 0.0,
+    "patternScale": 2,
+    "seed": 1337
+  },
+  {
+    "name": "Lo-fi Poster (FS)",
+    "palette": ["#000000","#ffffff","#ff0066","#00d1ff","#ffd300"],
+    "pixelate": 1,
+    "mode": "indexed",
+    "algorithm": "floyd-steinberg",
+    "serpentine": true,
+    "diffusionStrength": 1.0,
+    "thresholdBias": 0.0,
+    "patternScale": 1,
+    "seed": 42
+  }
+]
+
