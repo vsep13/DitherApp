@@ -1,6 +1,6 @@
-# Dither Pusher (Web) — Prototype
+# Dither Web — Prototype
 
-A browser-based image ditherer inspired by the "Dither Pusher 2" Photoshop plugin. This prototype focuses on the core GPU pipeline, fast preview, and a minimal UI for iteration.
+A browser-based image ditherer inspired by the Dither Photoshop plugin. This prototype focuses on the core GPU pipeline, fast preview, and a minimal UI for iteration.
 
 Status: prototype (GPU previews, CPU ED kernels, pixelate, palette editing, indexed PNG + masks, batch/image+video, unit tests)
 
